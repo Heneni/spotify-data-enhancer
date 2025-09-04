@@ -3,51 +3,34 @@ name: Run Spotify Test
 on:
   workflow_dispatch:
   push:
-    paths:
-      - 'test_1000_fast.py'
-      - 'spotify_enhancer.py'
+    branches: [ main ]
 
 jobs:
-  test-spotify-enhancer:
+  spotify-test:
     runs-on: ubuntu-latest
     
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
-      
-    - name: Set up Python
+    - uses: actions/checkout@v3
+    
+    - name: Set up Python 3.11
       uses: actions/setup-python@v4
       with:
-        python-version: '3.11'
-        
+        python-version: 3.11
+    
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install requests pandas
-        
-    - name: Run fast test
+        pip install requests
+    
+    - name: Run Simple Spotify Test
       run: |
-        echo "🚀 Starting Spotify Fast Test..."
-        python test_1000_fast.py
+        python simple_test.py
         
-    - name: Check results
-      run: |
-        echo "📊 Checking test results..."
-        if [ -f "enhanced_test_1000_features_only.csv" ]; then
-          echo "✅ Output file created successfully"
-          echo "📁 File size: $(du -h enhanced_test_1000_features_only.csv | cut -f1)"
-          echo "📊 Lines: $(wc -l < enhanced_test_1000_features_only.csv)"
-          echo "🔍 First few lines of output:"
-          head -5 enhanced_test_1000_features_only.csv
-        else
-          echo "❌ Output file not found"
-          exit 1
-        fi
-        
-    - name: Upload results
+    - name: Upload test results
       uses: actions/upload-artifact@v3
+      if: always()
       with:
-        name: enhanced-test-results
+        name: spotify-test-results
         path: |
-          enhanced_test_1000_features_only.csv
-          test_tracks_1000_features_only.csv
+          simple_test_results.csv
+          *.log
