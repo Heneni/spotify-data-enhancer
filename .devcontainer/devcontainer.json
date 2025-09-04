@@ -1,12 +1,11 @@
 {
-    "name": "Spotify Data Enhancer",
+    "name": "Spotify Test Runner",
     "image": "python:3.11-slim",
-    "postCreateCommand": "pip install requests pandas",
+    "postCreateCommand": "pip install requests && python RUN_THIS.py",
+    "forwardPorts": [],
     "customizations": {
         "vscode": {
-            "extensions": [
-                "ms-python.python"
-            ]
+            "extensions": ["ms-python.python"]
         }
     }
 }
