@@ -1,375 +1,353 @@
 #!/usr/bin/env python3
 """
-Spotify Data Enhancer for GitHub Codespaces
-Enhances your Spotify track data with audio features and analysis
+🎵 Spotify Data Enhancer
+Enhanced version with comprehensive audio features extraction
+
+Built on the foundation of the successful inline test from devcontainer.json
+Processes large datasets efficiently with batch operations and progress tracking
 """
 
 import requests
-import pandas as pd
+import base64
 import time
 import json
-import base64
-from typing import List, Dict, Optional
-import argparse
-import sys
+import pandas as pd
 import os
+from typing import List, Dict, Optional
+import logging
+from tqdm import tqdm
+import argparse
+from datetime import datetime
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('spotify_enhancement.log'),
+        logging.StreamHandler()
+    ]
+)
 
 class SpotifyDataEnhancer:
-    def __init__(self):
-        self.CLIENT_ID = 'efef0dbb87ee4c37b550508ae2791737'
-        self.CLIENT_SECRET = '09c12b5178734b5aae18743d5b4335d5'
+    """Enhanced Spotify data processor with batch operations and progress tracking"""
+    
+    def __init__(self, client_id: str = None, client_secret: str = None):
+        # Use provided credentials or default from inline test
+        self.client_id = client_id or "efef0dbb87ee4c37b550508ae2791737"
+        self.client_secret = client_secret or "09c12b5178734b5aae18743d5b4335d5"
         self.access_token = None
-        self.session = requests.Session()
+        self.token_expires_at = 0
+        self.batch_size = 100  # Spotify API allows up to 100 tracks per batch
+        self.rate_limit_delay = 0.1  # 100ms between requests to be conservative
         
     def authenticate(self) -> bool:
-        """Authenticate with Spotify API using Client Credentials flow"""
+        """Authenticate with Spotify API using the successful method from inline test"""
         try:
-            print("🔐 Authenticating with Spotify API...")
+            print("🔐 Authenticating with Spotify...")
+            credentials = base64.b64encode(f"{self.client_id}:{self.client_secret}".encode()).decode()
             
-            # Encode credentials
-            credentials = base64.b64encode(
-                f"{self.CLIENT_ID}:{self.CLIENT_SECRET}".encode()
-            ).decode()
-            
-            headers = {
-                'Authorization': f'Basic {credentials}',
-                'Content-Type': 'application/x-www-form-urlencoded'
-            }
-            
-            data = {'grant_type': 'client_credentials'}
-            
-            response = self.session.post(
+            auth_response = requests.post(
                 'https://accounts.spotify.com/api/token',
-                headers=headers,
-                data=data,
-                timeout=10
+                headers={
+                    'Authorization': f'Basic {credentials}',
+                    'Content-Type': 'application/x-www-form-urlencoded'
+                },
+                data='grant_type=client_credentials'
             )
             
-            if response.status_code == 200:
-                token_data = response.json()
+            if auth_response.status_code == 200:
+                token_data = auth_response.json()
                 self.access_token = token_data['access_token']
-                expires_in = token_data.get('expires_in', 3600)
-                print(f"✅ Successfully authenticated! Token expires in {expires_in} seconds")
+                self.token_expires_at = time.time() + token_data['expires_in'] - 300  # 5 min buffer
+                print("✅ Authentication successful!")
+                logging.info("Spotify authentication successful")
                 return True
             else:
-                print(f"❌ Authentication failed: {response.status_code}")
-                print(f"Response: {response.text}")
+                print(f"❌ Authentication failed: {auth_response.status_code}")
+                logging.error(f"Authentication failed: {auth_response.text}")
                 return False
                 
         except Exception as e:
-            print(f"❌ Authentication error: {e}")
+            print(f"❌ Authentication error: {str(e)}")
+            logging.error(f"Authentication error: {str(e)}")
             return False
     
-    def extract_track_id(self, uri: str) -> Optional[str]:
-        """Extract Spotify track ID from URI or URL"""
-        if not uri:
-            return None
-            
-        if 'spotify:track:' in uri:
-            track_id = uri.split(':')[2]
-        elif '/track/' in uri:
-            track_id = uri.split('/track/')[1].split('?')[0]
-        else:
-            track_id = uri.strip()
-            
-        # Validate track ID format (22 characters, alphanumeric)
-        if len(track_id) == 22 and track_id.replace('_', '').replace('-', '').isalnum():
-            return track_id
-        return None
+    def ensure_authenticated(self) -> bool:
+        """Ensure we have a valid access token"""
+        if not self.access_token or time.time() >= self.token_expires_at:
+            return self.authenticate()
+        return True
     
-    def make_spotify_request(self, endpoint: str, max_retries: int = 3) -> Optional[Dict]:
-        """Make request to Spotify API with retry logic"""
-        if not self.access_token:
-            print("❌ Not authenticated")
-            return None
-            
-        headers = {'Authorization': f'Bearer {self.access_token}'}
+    def get_audio_features_batch(self, track_ids: List[str]) -> List[Dict]:
+        """Get audio features for a batch of tracks (up to 100)"""
+        if not self.ensure_authenticated():
+            return []
         
-        for attempt in range(max_retries):
-            try:
-                response = self.session.get(
-                    f'https://api.spotify.com{endpoint}',
-                    headers=headers,
-                    timeout=30
-                )
+        if len(track_ids) > 100:
+            raise ValueError("Batch size cannot exceed 100 tracks")
+        
+        try:
+            # Filter out any None or empty track IDs
+            valid_ids = [tid for tid in track_ids if tid and len(tid) == 22]
+            if not valid_ids:
+                return []
+            
+            ids_string = ','.join(valid_ids)
+            url = f'https://api.spotify.com/v1/audio-features?ids={ids_string}'
+            
+            response = requests.get(
+                url,
+                headers={'Authorization': f'Bearer {self.access_token}'}
+            )
+            
+            if response.status_code == 200:
+                data = response.json()
+                return data.get('audio_features', [])
+            elif response.status_code == 429:
+                # Rate limited - wait and retry
+                retry_after = int(response.headers.get('Retry-After', 1))
+                print(f"⏳ Rate limited, waiting {retry_after} seconds...")
+                time.sleep(retry_after)
+                return self.get_audio_features_batch(track_ids)
+            else:
+                logging.warning(f"API error: {response.status_code} - {response.text}")
+                return []
                 
-                if response.status_code == 200:
-                    return response.json()
-                elif response.status_code == 429:
-                    # Rate limited
-                    retry_after = int(response.headers.get('Retry-After', 1))
-                    print(f"⏳ Rate limited. Waiting {retry_after} seconds... (attempt {attempt + 1})")
-                    time.sleep(retry_after)
-                    continue
-                elif response.status_code == 401:
-                    print("🔐 Token expired, re-authenticating...")
-                    if self.authenticate():
-                        headers = {'Authorization': f'Bearer {self.access_token}'}
-                        continue
-                    else:
-                        return None
+        except Exception as e:
+            logging.error(f"Error getting audio features: {str(e)}")
+            return []
+    
+    def process_dataset(self, input_file: str, output_file: str, resume: bool = True) -> Dict:
+        """Process a large dataset with progress tracking and resumption capability"""
+        
+        print(f"🎵 Starting Spotify Data Enhancement")
+        print(f"📂 Input file: {input_file}")
+        print(f"💾 Output file: {output_file}")
+        
+        # Load input data
+        if not os.path.exists(input_file):
+            raise FileNotFoundError(f"Input file not found: {input_file}")
+        
+        print("📊 Loading dataset...")
+        if input_file.endswith('.csv'):
+            df = pd.read_csv(input_file)
+        elif input_file.endswith('.json'):
+            df = pd.read_json(input_file)
+        else:
+            raise ValueError("Unsupported file format. Use CSV or JSON.")
+        
+        total_tracks = len(df)
+        print(f"🎯 Found {total_tracks:,} tracks to process")
+        
+        # Check for resume capability
+        processed_ids = set()
+        if resume and os.path.exists(output_file):
+            print("🔄 Resume mode: Loading previous results...")
+            try:
+                if output_file.endswith('.csv'):
+                    existing_df = pd.read_csv(output_file)
                 else:
-                    print(f"❌ API request failed: {response.status_code} - {response.text}")
-                    return None
-                    
-            except requests.exceptions.Timeout:
-                print(f"⏰ Request timeout (attempt {attempt + 1})")
-                if attempt < max_retries - 1:
-                    time.sleep(2)
-                    continue
-            except Exception as e:
-                print(f"❌ Request error (attempt {attempt + 1}): {e}")
-                if attempt < max_retries - 1:
-                    time.sleep(1)
-                    continue
-                    
-        return None
-    
-    def fetch_audio_features_batch(self, track_ids: List[str]) -> List[Dict]:
-        """Fetch audio features for multiple tracks (up to 100)"""
-        if not track_ids:
-            return []
-            
-        # Filter out invalid IDs and limit to 100
-        valid_ids = [tid for tid in track_ids if tid and len(tid) == 22][:100]
-        if not valid_ids:
-            return []
-        
-        endpoint = f"/v1/audio-features?ids={','.join(valid_ids)}"
-        response = self.make_spotify_request(endpoint)
-        
-        if response and 'audio_features' in response:
-            return [f for f in response['audio_features'] if f is not None]
-        return []
-    
-    def fetch_audio_analysis(self, track_id: str) -> Optional[Dict]:
-        """Fetch detailed audio analysis for a single track"""
-        if not track_id or len(track_id) != 22:
-            return None
-            
-        endpoint = f"/v1/audio-analysis/{track_id}"
-        return self.make_spotify_request(endpoint)
-    
-    def enhance_tracks(self, df: pd.DataFrame, include_analysis: bool = False, sample_size: Optional[int] = None) -> pd.DataFrame:
-        """Enhance tracks DataFrame with Spotify data"""
-        
-        # Sample data if requested (for testing)
-        if sample_size and sample_size < len(df):
-            print(f"🎯 Sampling {sample_size} tracks for testing...")
-            df = df.sample(n=sample_size, random_state=42).reset_index(drop=True)
-        
-        print(f"📊 Processing {len(df)} tracks...")
-        
-        enhanced_df = df.copy()
-        batch_size = 50  # Conservative batch size
-        processed = 0
-        errors = 0
-        analysis_processed = 0
-        
-        # Add new columns for enhanced features
-        feature_columns = [
-            'enhanced_acousticness', 'enhanced_danceability', 'enhanced_energy',
-            'enhanced_instrumentalness', 'enhanced_liveness', 'enhanced_loudness',
-            'enhanced_speechiness', 'enhanced_tempo', 'enhanced_valence',
-            'enhanced_key', 'enhanced_mode', 'enhanced_time_signature', 'duration_ms'
-        ]
-        
-        if include_analysis:
-            analysis_columns = [
-                'bars_count', 'beats_count', 'sections_count', 'segments_count',
-                'tatums_count', 'first_section_tempo', 'first_section_loudness',
-                'first_section_key', 'first_section_mode'
-            ]
-            feature_columns.extend(analysis_columns)
-        
-        # Initialize new columns
-        for col in feature_columns:
-            enhanced_df[col] = None
+                    existing_df = pd.read_json(output_file)
+                
+                if 'id' in existing_df.columns:
+                    processed_ids = set(existing_df['id'].tolist())
+                    print(f"✅ Found {len(processed_ids):,} previously processed tracks")
+            except:
+                print("⚠️ Could not load existing results, starting fresh")
         
         # Process in batches
-        total_batches = (len(df) + batch_size - 1) // batch_size
+        results = []
+        failed_count = 0
+        success_count = 0
         
-        for i in range(0, len(df), batch_size):
-            batch = df.iloc[i:i+batch_size]
-            batch_num = i // batch_size + 1
-            
-            print(f"\n🔄 Processing batch {batch_num}/{total_batches} ({len(batch)} tracks)")
-            
-            # Extract track IDs from batch
-            track_ids = []
-            batch_indices = []
-            
-            for idx, row in batch.iterrows():
-                track_id = self.extract_track_id(row.get('spotify_track_uri', ''))
-                if track_id:
-                    track_ids.append(track_id)
-                    batch_indices.append(idx)
-            
-            print(f"   📋 Found {len(track_ids)} valid track IDs in batch")
-            
-            if not track_ids:
-                errors += len(batch)
-                print(f"   ❌ No valid track IDs found in batch")
-                continue
-            
-            # Fetch audio features for batch
-            audio_features = self.fetch_audio_features_batch(track_ids)
-            print(f"   ✅ Retrieved {len(audio_features)} audio feature sets")
-            
-            # Process each track in batch
-            for track_id, df_idx in zip(track_ids, batch_indices):
-                features = None
+        # Identify track ID column
+        id_columns = ['id', 'track_id', 'spotify_id', 'trackId']
+        id_column = None
+        for col in id_columns:
+            if col in df.columns:
+                id_column = col
+                break
+        
+        if not id_column:
+            raise ValueError(f"No track ID column found. Expected one of: {id_columns}")
+        
+        print(f"🎼 Using '{id_column}' as track ID column")
+        
+        # Create batches
+        remaining_df = df[~df[id_column].isin(processed_ids)] if processed_ids else df
+        track_ids = remaining_df[id_column].tolist()
+        
+        if not track_ids:
+            print("✅ All tracks already processed!")
+            return {"total": total_tracks, "success": len(processed_ids), "failed": 0}
+        
+        print(f"🚀 Processing {len(track_ids):,} remaining tracks...")
+        
+        # Process in batches with progress bar
+        with tqdm(total=len(track_ids), desc="Enhancing tracks", unit="tracks") as pbar:
+            for i in range(0, len(track_ids), self.batch_size):
+                batch_ids = track_ids[i:i + self.batch_size]
+                batch_df = remaining_df.iloc[i:i + self.batch_size]
                 
-                # Find features for this track
-                for feature in audio_features:
-                    if feature and feature.get('id') == track_id:
-                        features = feature
-                        break
+                # Get audio features for this batch
+                audio_features = self.get_audio_features_batch(batch_ids)
                 
-                if features:
-                    # Add audio features
-                    enhanced_df.loc[df_idx, 'enhanced_acousticness'] = features.get('acousticness')
-                    enhanced_df.loc[df_idx, 'enhanced_danceability'] = features.get('danceability')
-                    enhanced_df.loc[df_idx, 'enhanced_energy'] = features.get('energy')
-                    enhanced_df.loc[df_idx, 'enhanced_instrumentalness'] = features.get('instrumentalness')
-                    enhanced_df.loc[df_idx, 'enhanced_liveness'] = features.get('liveness')
-                    enhanced_df.loc[df_idx, 'enhanced_loudness'] = features.get('loudness')
-                    enhanced_df.loc[df_idx, 'enhanced_speechiness'] = features.get('speechiness')
-                    enhanced_df.loc[df_idx, 'enhanced_tempo'] = features.get('tempo')
-                    enhanced_df.loc[df_idx, 'enhanced_valence'] = features.get('valence')
-                    enhanced_df.loc[df_idx, 'enhanced_key'] = features.get('key')
-                    enhanced_df.loc[df_idx, 'enhanced_mode'] = features.get('mode')
-                    enhanced_df.loc[df_idx, 'enhanced_time_signature'] = features.get('time_signature')
-                    enhanced_df.loc[df_idx, 'duration_ms'] = features.get('duration_ms')
-                    
-                    # Add detailed analysis if requested (for all tracks when analysis=True)
-                    if include_analysis:
-                        if analysis_processed % 50 == 0:  # Log progress every 50 analyses
-                            print(f"   🔍 Fetching detailed analysis ({analysis_processed + 1})...")
-                        
-                        analysis = self.fetch_audio_analysis(track_id)
-                        
-                        if analysis:
-                            enhanced_df.loc[df_idx, 'bars_count'] = len(analysis.get('bars', []))
-                            enhanced_df.loc[df_idx, 'beats_count'] = len(analysis.get('beats', []))
-                            enhanced_df.loc[df_idx, 'sections_count'] = len(analysis.get('sections', []))
-                            enhanced_df.loc[df_idx, 'segments_count'] = len(analysis.get('segments', []))
-                            enhanced_df.loc[df_idx, 'tatums_count'] = len(analysis.get('tatums', []))
-                            
-                            sections = analysis.get('sections', [])
-                            if sections:
-                                first_section = sections[0]
-                                enhanced_df.loc[df_idx, 'first_section_tempo'] = first_section.get('tempo')
-                                enhanced_df.loc[df_idx, 'first_section_loudness'] = first_section.get('loudness')
-                                enhanced_df.loc[df_idx, 'first_section_key'] = first_section.get('key')
-                                enhanced_df.loc[df_idx, 'first_section_mode'] = first_section.get('mode')
-                            
-                            analysis_processed += 1
-                        
-                        # Add delay for analysis requests
-                        time.sleep(0.1)
-                    
-                    processed += 1
-                else:
-                    errors += 1
-            
-            # Progress update
-            success_rate = (processed / (processed + errors) * 100) if (processed + errors) > 0 else 0
-            print(f"   📊 Batch complete: {processed} total processed, {errors} errors ({success_rate:.1f}% success)")
-            if include_analysis:
-                print(f"   🔍 Analysis completed: {analysis_processed} tracks")
-            
-            # Add delay between batches to be nice to the API
-            time.sleep(0.3)
+                # Merge with original data
+                for j, features in enumerate(audio_features):
+                    if features:  # Features can be None for invalid tracks
+                        row_data = batch_df.iloc[j].to_dict()
+                        # Add audio features to the row
+                        row_data.update(features)
+                        results.append(row_data)
+                        success_count += 1
+                    else:
+                        # Keep original data for failed tracks
+                        results.append(batch_df.iloc[j].to_dict())
+                        failed_count += 1
+                
+                pbar.update(len(batch_ids))
+                
+                # Save intermediate results every 1000 tracks
+                if len(results) % 1000 == 0:
+                    self._save_intermediate_results(results, output_file, processed_ids)
+                
+                # Rate limiting
+                time.sleep(self.rate_limit_delay)
         
-        print(f"\n🎉 Enhancement complete!")
-        print(f"📈 Final stats: {processed} enhanced, {errors} errors out of {len(df)} total tracks")
-        print(f"✅ Success rate: {(processed / len(df) * 100):.1f}%")
-        if include_analysis:
-            print(f"🔍 Analysis completed for {analysis_processed} tracks")
+        # Final save
+        self._save_final_results(results, output_file, processed_ids)
         
-        return enhanced_df
+        stats = {
+            "total": total_tracks,
+            "success": success_count + len(processed_ids),
+            "failed": failed_count,
+            "enhancement_rate": (success_count + len(processed_ids)) / total_tracks * 100
+        }
+        
+        print(f"\n🎉 Processing complete!")
+        print(f"✅ Success: {stats['success']:,} tracks ({stats['enhancement_rate']:.1f}%)")
+        print(f"❌ Failed: {stats['failed']:,} tracks")
+        print(f"💾 Results saved to: {output_file}")
+        
+        return stats
     
-    def process_file(self, input_path: str, output_path: str, include_analysis: bool = False, sample_size: Optional[int] = None):
-        """Process CSV file and enhance with Spotify data"""
+    def _save_intermediate_results(self, results: List[Dict], output_file: str, processed_ids: set):
+        """Save intermediate results during processing"""
         try:
-            print("🎵 Spotify Data Enhancer - Codespace Edition")
-            print("=" * 45)
-            print(f"📄 Input file: {input_path}")
-            print(f"💾 Output file: {output_path}")
-            print(f"🔍 Include analysis: {'Yes' if include_analysis else 'No'}")
-            if sample_size:
-                print(f"🎯 Sample size: {sample_size} tracks")
-            print()
+            if output_file.endswith('.csv'):
+                pd.DataFrame(results).to_csv(f"{output_file}.tmp", index=False)
+            else:
+                with open(f"{output_file}.tmp", 'w') as f:
+                    json.dump(results, f, indent=2)
+            logging.info(f"Saved intermediate results: {len(results)} records")
+        except Exception as e:
+            logging.error(f"Error saving intermediate results: {str(e)}")
+    
+    def _save_final_results(self, results: List[Dict], output_file: str, processed_ids: set):
+        """Save final results"""
+        try:
+            if output_file.endswith('.csv'):
+                pd.DataFrame(results).to_csv(output_file, index=False)
+            else:
+                with open(output_file, 'w') as f:
+                    json.dump(results, f, indent=2)
             
-            # Check if input file exists
-            if not os.path.exists(input_path):
-                raise FileNotFoundError(f"Input file not found: {input_path}")
-            
-            # Authenticate
-            if not self.authenticate():
-                raise Exception("Authentication failed")
-            
-            # Load CSV
-            print(f"📁 Loading {input_path}...")
-            try:
-                df = pd.read_csv(input_path)
-                print(f"📊 Loaded {len(df)} tracks with {len(df.columns)} columns")
+            # Remove temporary file if it exists
+            temp_file = f"{output_file}.tmp"
+            if os.path.exists(temp_file):
+                os.remove(temp_file)
                 
-                # Show sample of data
-                if 'spotify_track_uri' in df.columns:
-                    valid_uris = df['spotify_track_uri'].notna().sum()
-                    print(f"🎯 Found {valid_uris} non-empty Spotify URIs")
-                    
-                    # Show sample URIs
-                    sample_uris = df['spotify_track_uri'].dropna().head(3).tolist()
-                    print(f"📋 Sample URIs: {sample_uris}")
-                else:
-                    print("⚠️  Warning: No 'spotify_track_uri' column found")
-                    print("Available columns:", list(df.columns))
-                    
-            except Exception as e:
-                raise Exception(f"Failed to load CSV: {e}")
+        except Exception as e:
+            logging.error(f"Error saving final results: {str(e)}")
+    
+    def validate_enhancement(self, output_file: str) -> Dict:
+        """Validate the enhancement results"""
+        if not os.path.exists(output_file):
+            return {"error": "Output file not found"}
+        
+        try:
+            if output_file.endswith('.csv'):
+                df = pd.read_csv(output_file)
+            else:
+                df = pd.read_json(output_file)
             
-            # Enhance data
-            enhanced_df = self.enhance_tracks(df, include_analysis, sample_size)
+            # Check for audio features columns
+            audio_features_cols = [
+                'danceability', 'energy', 'key', 'loudness', 'mode',
+                'speechiness', 'acousticness', 'instrumentalness',
+                'liveness', 'valence', 'tempo', 'duration_ms'
+            ]
             
-            # Save enhanced data
-            print(f"\n💾 Saving enhanced data to {output_path}...")
-            enhanced_df.to_csv(output_path, index=False)
-            print(f"✅ Enhanced data saved successfully!")
+            enhanced_cols = [col for col in audio_features_cols if col in df.columns]
+            enhanced_count = df[enhanced_cols[0]].notna().sum() if enhanced_cols else 0
             
-            # Print summary
-            new_columns = len(enhanced_df.columns) - len(df.columns)
-            print(f"\n📈 Summary:")
-            print(f"   • Added {new_columns} new columns")
-            print(f"   • Original size: {len(df)} rows × {len(df.columns)} columns")
-            print(f"   • Enhanced size: {len(enhanced_df)} rows × {len(enhanced_df.columns)} columns")
-            print(f"   • Output file size: {os.path.getsize(output_path) / 1024 / 1024:.1f} MB")
-            
-            # Show new column names
-            enhanced_cols = [col for col in enhanced_df.columns if 'enhanced_' in col or col in ['duration_ms', 'bars_count', 'beats_count', 'sections_count']]
-            print(f"\n🆕 New columns added: {', '.join(enhanced_cols[:10])}{'...' if len(enhanced_cols) > 10 else ''}")
+            return {
+                "total_rows": len(df),
+                "enhanced_rows": enhanced_count,
+                "enhancement_rate": enhanced_count / len(df) * 100,
+                "audio_features_columns": enhanced_cols
+            }
             
         except Exception as e:
-            print(f"❌ Processing failed: {e}")
-            sys.exit(1)
+            return {"error": str(e)}
 
 def main():
-    parser = argparse.ArgumentParser(description='Enhance Spotify track data with audio features')
-    parser.add_argument('input', nargs='?', default='tracks_for_import.csv', 
-                       help='Input CSV file path (default: tracks_for_import.csv)')
-    parser.add_argument('output', nargs='?', default='enhanced_spotify_tracks.csv', 
-                       help='Output CSV file path (default: enhanced_spotify_tracks.csv)')
-    parser.add_argument('--analysis', action='store_true', 
-                       help='Include detailed audio analysis for ALL tracks')
-    parser.add_argument('--sample', type=int, 
-                       help='Process only a sample of tracks (for testing)')
+    """Main execution function with command line interface"""
+    parser = argparse.ArgumentParser(description='Enhance Spotify data with audio features')
+    parser.add_argument('input', help='Input file (CSV or JSON)')
+    parser.add_argument('-o', '--output', help='Output file (default: enhanced_<input>)')
+    parser.add_argument('--client-id', help='Spotify Client ID')
+    parser.add_argument('--client-secret', help='Spotify Client Secret')
+    parser.add_argument('--no-resume', action='store_true', help='Start fresh (ignore existing results)')
+    parser.add_argument('--validate', action='store_true', help='Validate enhancement results only')
     
     args = parser.parse_args()
     
-    enhancer = SpotifyDataEnhancer()
-    enhancer.process_file(args.input, args.output, args.analysis, args.sample)
+    # Determine output file
+    if not args.output:
+        name, ext = os.path.splitext(args.input)
+        args.output = f"{name}_enhanced{ext}"
+    
+    # Create enhancer instance
+    enhancer = SpotifyDataEnhancer(args.client_id, args.client_secret)
+    
+    if args.validate:
+        # Validation mode
+        print("🔍 Validating enhancement results...")
+        results = enhancer.validate_enhancement(args.output)
+        
+        if "error" in results:
+            print(f"❌ Validation error: {results['error']}")
+            return 1
+        
+        print(f"📊 Validation Results:")
+        print(f"   Total rows: {results['total_rows']:,}")
+        print(f"   Enhanced rows: {results['enhanced_rows']:,}")
+        print(f"   Enhancement rate: {results['enhancement_rate']:.1f}%")
+        print(f"   Audio features: {', '.join(results['audio_features_columns'])}")
+        
+        return 0
+    
+    try:
+        # Run the enhancement
+        start_time = time.time()
+        stats = enhancer.process_dataset(
+            args.input, 
+            args.output, 
+            resume=not args.no_resume
+        )
+        processing_time = time.time() - start_time
+        
+        print(f"\n⏱️ Total processing time: {processing_time/60:.1f} minutes")
+        print(f"⚡ Processing rate: {stats['success']/(processing_time/60):.0f} tracks/minute")
+        
+        return 0
+        
+    except Exception as e:
+        print(f"❌ Error: {str(e)}")
+        logging.error(f"Main execution error: {str(e)}")
+        return 1
 
-if __name__ == '__main__':
-    main()
+if __name__ == "__main__":
+    exit(main())
